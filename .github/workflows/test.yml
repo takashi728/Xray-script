@@ -28,22 +28,8 @@ jobs:
           load: true
           tags: xray-core:e2e
 
-      - name: Generate REALITY keypair
-        id: keys
-        run: |
-          KEYS="$(docker run --rm --entrypoint xray xray-core:e2e x25519)"
-          echo "private=$(echo "$KEYS" | sed -n 's/.*Private key: //p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          echo "public=$(echo "$KEYS"  | sed -n 's/.*Public key: //p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          echo "uuid=$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
-          echo "short_id=$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
-
-      - name: Generate Xray configs (server + client)
-        run: |
-          export UUID="${{ steps.keys.outputs.uuid }}"
-          export PRIVATE_KEY="${{ steps.keys.outputs.private }}"
-          export PUBLIC_KEY="${{ steps.keys.outputs.public }}"
-          export SHORT_ID="${{ steps.keys.outputs.short_id }}"
-          python3 .github/scripts/gen-configs.py
+      - name: Generate Xray configs (keys + server + client)
+        run: python3 .github/scripts/gen-configs.py
 
       - name: Start server container (VPS)
         run: |
