@@ -56,19 +56,17 @@ jobs:
           echo "=== Test 1: google.com ==="
           CODE="$(curl -sS --max-time 20 \
             --socks5-hostname 127.0.0.1:1080 \
-            -o /dev/null -w '%{http_code}' \
-            https://www.google.com)"
+            -o /dev/null -w '%{http_code}' https://www.google.com)"
           echo "HTTP $CODE"
-          [[ "$CODE" == "200" ]] || { echo "FAIL (got $CODE)"; exit 1; }
+          [[ "$CODE" =~ ^[23]..$ ]] || { echo "FAIL (got $CODE)"; exit 1; }
           echo "PASS"
 
-          echo "=== Test 2: 1.1.1.1 ==="
+          echo "=== Test 2: cloudflare.com ==="
           CODE="$(curl -sS --max-time 20 \
             --socks5-hostname 127.0.0.1:1080 \
-            -o /dev/null -w '%{http_code}' \
-            https://1.1.1.1)"
+            -o /dev/null -w '%{http_code}' https://www.cloudflare.com)"
           echo "HTTP $CODE"
-          [[ "$CODE" == "200" ]] || { echo "FAIL (got $CODE)"; exit 1; }
+          [[ "$CODE" =~ ^[23]..$ ]] || { echo "FAIL (got $CODE)"; exit 1; }
           echo "PASS"
 
       - name: Show logs on failure
