@@ -1,0 +1,48 @@
+{
+    debug
+    servers {
+        layer4
+    }
+    email {{CA_EMAIL}}
+}
+
+# Layer 4 — SNI split without terminating TLS for REALITY path
+:443 {
+    @reality tls sni {{DOMAIN}}
+    handle @reality {
+        proxy xray:8443
+    }
+    @cdn tls sni {{CDN_DOMAIN}}
+    handle @cdn {
+        tls
+        route {
+            reverse_proxy xray:8444
+        }
+    }
+    {{CUSTOM_SITES_L4}}
+}
+
+# HTTP app — TLS-terminated traffic from CDN domain
+{{CDN_DOMAIN}} {
+    handle /{{XHTTP_PATH}}* {
+        reverse_proxy xray:8444 {
+            transport http {
+                versions h2c
+            }
+        }
+    }
+    handle {
+        reverse_proxy xray:8444 {
+            transport http {
+                versions h2c
+            }
+        }
+    }
+}
+
+{{CUSTOM_SITES_HTTP}}
+
+# ACME HTTP challenge
+:80 {
+    redir https://{host}{uri}
+}

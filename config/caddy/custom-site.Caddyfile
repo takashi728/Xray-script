@@ -1,0 +1,14 @@
+# Custom site — {{DOMAIN}}
+:443 {
+    @{{DOMAIN_SNI}} tls sni {{DOMAIN}}
+    handle @{{DOMAIN_SNI}} {
+        tls
+        route {
+            reverse_proxy {{PROXY_TARGET}}
+        }
+    }
+}
+
+{{DOMAIN}} {
+    reverse_proxy {{PROXY_TARGET}}
+}

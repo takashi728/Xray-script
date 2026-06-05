@@ -43,28 +43,33 @@ readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所�
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
 
-# 定义项目内相关目录和脚本的路径
-readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script" # 主配置文件目录
-readonly I18N_DIR="${PROJECT_ROOT}/i18n"          # 国际化文件目录
-readonly CONFIG_DIR="${PROJECT_ROOT}/config"      # 配置文件目录
-readonly SERVICE_DIR="${PROJECT_ROOT}/service"    # 服务管理脚本目录
-readonly TOOL_DIR="${PROJECT_ROOT}/tool"          # 工具脚本目录
-readonly SCRIPT_XRAY_DIR="${CONFIG_DIR}/xray"     # Xray 配置模板目录
-readonly NGINX_CONFIG_DIR="/usr/local/nginx/conf" # Nginx 配置目录 (目标路径)
-# 定义项目内子脚本的路径
-readonly GENERATE_PATH="${CUR_DIR}/generate.sh" # 生成器脚本
-readonly CHECK_PATH="${CUR_DIR}/check.sh"       # 检查器脚本
-readonly SHARE_PATH="${CUR_DIR}/share.sh"       # 分享链接生成脚本
-readonly READ_PATH="${CUR_DIR}/read.sh"         # 用户输入读取脚本
-readonly NGINX_PATH="${SERVICE_DIR}/nginx.sh"   # Nginx 服务管理脚本
-readonly SSL_PATH="${SERVICE_DIR}/ssl.sh"       # SSL 证书管理脚本
-readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh" # Docker 容器管理脚本
-readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"  # 流量统计脚本
-readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"  # GeoData 更新脚本
-# 定义外部配置文件和脚本的路径
-readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"    # Xray 最终配置文件路径
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
-readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"                  # ACME.sh 脚本路径
+
+readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
+readonly I18N_DIR="${PROJECT_ROOT}/i18n"
+readonly CONFIG_DIR="${PROJECT_ROOT}/config"
+readonly SERVICE_DIR="${PROJECT_ROOT}/service"
+readonly TOOL_DIR="${PROJECT_ROOT}/tool"
+readonly SCRIPT_XRAY_DIR="${CONFIG_DIR}/xray"
+readonly DOCKER_DIR="${SCRIPT_CONFIG_DIR}/docker"
+readonly CADDY_CONFIG_DIR="${DOCKER_DIR}/caddy"
+
+readonly GENERATE_PATH="${CUR_DIR}/generate.sh"
+readonly CHECK_PATH="${CUR_DIR}/check.sh"
+readonly SHARE_PATH="${CUR_DIR}/share.sh"
+readonly READ_PATH="${CUR_DIR}/read.sh"
+readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh"
+readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"
+readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"
+
+readonly XRAY_CONFIG_PATH="${DOCKER_DIR}/xray/config.json"
+readonly CADDY_CONFIG_PATH="${CADDY_CONFIG_DIR}/Caddyfile"
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
+
+readonly DOCKER_XRAY_IMAGE="ghcr.io/takashi728/xray-core"
+readonly DOCKER_CADDY_IMAGE="ghcr.io/takashi728/caddy-l4"
+readonly DOCKER_XRAY_CONTAINER="xray"
+readonly DOCKER_CADDY_CONTAINER="caddy"
+readonly DOCKER_XRAY_NETWORK="xray-net"
 
 # --- 全局变量声明 ---
 # 声明用于存储配置数据和国际化数据的全局变量
@@ -156,17 +161,12 @@ function exec_docker() {
     bash "${DOCKER_PATH}" "$@" || exit 1
 }
 
-# =============================================================================
-# 函数名称: exec_ssl
-# 功能描述: 执行 ssl.sh 脚本，用于管理 SSL 证书相关操作。
-# 参数:
-#   $@: 传递给 ssl.sh 脚本的参数
-# 返回值: ssl.sh 脚本的退出码 (通过 return $? 返回)
-# =============================================================================
+function exec_docker() {
+    bash "${DOCKER_PATH}" "$@" || exit 1
+}
+# exec_ssl is a no-op — Caddy handles ACME automatically
 function exec_ssl() {
-    # 执行 ssl.sh 脚本，并传递所有参数
-    bash "${SSL_PATH}" "$@"
-    return $?
+    return 0
 }
 
 # =============================================================================
@@ -391,135 +391,94 @@ function sync_missing_nginx_support_dir() {
     local target_path=''
 
     [[ -d "${source_dir}" ]] || return 0
-    mkdir -p "${target_dir}" || return 1
-
-    while IFS= read -r -d '' source_path; do
-        relative_path="${source_path#${source_dir}/}"
-        target_path="${target_dir}/${relative_path}"
-        [[ -e "${target_path}" ]] && continue
-        mkdir -p "$(dirname "${target_path}")" || return 1
-        cp -f "${source_path}" "${target_path}" || return 1
-    done < <(find "${source_dir}" -type f -print0)
-}
-
-function ensure_nginx_support_files() {
-    mkdir -p \
-        "${NGINX_CONFIG_DIR}/sites-available" \
-        "${NGINX_CONFIG_DIR}/sites-enabled" \
-        "${NGINX_CONFIG_DIR}/modules-enabled" \
-        "${NGINX_CONFIG_DIR}/conf.d" \
-        "${NGINX_CONFIG_DIR}/web" \
-        "${NGINX_CONFIG_DIR}/nginxconfig.io" || return 1
-
-    sync_missing_nginx_support_dir "${CONFIG_DIR}/nginx/conf/conf.d" "${NGINX_CONFIG_DIR}/conf.d" || return 1
-    sync_missing_nginx_support_dir "${CONFIG_DIR}/nginx/conf/web" "${NGINX_CONFIG_DIR}/web" || return 1
-    sync_missing_nginx_support_dir "${CONFIG_DIR}/nginx/conf/nginxconfig.io" "${NGINX_CONFIG_DIR}/nginxconfig.io" || return 1
-}
-
-function write_stream_config() {
+function write_caddyfile() {
     local target_path="$1"
     local source_config="${2:-${SCRIPT_CONFIG}}"
-    local domain="$(echo "${source_config}" | jq -r '.nginx.domain')"
-    local cdn_domain="$(echo "${source_config}" | jq -r '.nginx.cdn')"
+    local domain="$(echo "${source_config}" | jq -r '.caddy.domain')"
+    local cdn_domain="$(echo "${source_config}" | jq -r '.caddy.cdn')"
+    local ca_email="$(echo "${source_config}" | jq -r '.caddy.ca_email')"
+    local xhttp_path="$(echo "${source_config}" | jq -r '.xray.path')"
+    local custom_sites_l4=''
+    local custom_sites_http=''
     local site_domain=''
+    local site_scheme=''
+    local site_host=''
     local site_port=''
-    local socket_name=''
-    local upstream_name=''
 
-    {
-        echo 'stream {'
-        echo '    map $ssl_preread_server_name $tcpsni_name {'
-        [[ -n "${domain}" && "${domain}" != 'null' ]] && printf '        %-30s %s;\n' "${domain}" 'nginx_to_xray_vision'
-        [[ -n "${cdn_domain}" && "${cdn_domain}" != 'null' ]] && printf '        %-30s %s;\n' "${cdn_domain}" 'cdn_to_nginx'
-        while IFS=$'\t' read -r site_domain site_port; do
-            [[ -n "${site_domain}" ]] || continue
-            upstream_name="$(get_custom_site_upstream_name "${site_domain}" "${site_port}")"
-            printf '        %-30s %s;\n' "${site_domain}" "${upstream_name}"
-        done < <(echo "${source_config}" | jq -r '.nginx.custom_sites // [] | .[] | [.domain, (.port | tostring)] | @tsv')
-        printf '        %-30s %s;\n' 'default' 'default_backend'
-        echo '    }'
-        echo
-        echo '    upstream nginx_to_xray_vision {'
-        echo '        server unix:/dev/shm/nginx/nginx_to_xray_vision.sock;'
-        echo '    }'
-        echo
-        echo '    upstream cdn_to_nginx {'
-        echo '        server unix:/dev/shm/nginx/cdn_to_nginx.sock;'
-        echo '    }'
-        echo
-        while IFS=$'\t' read -r site_domain site_port; do
-            [[ -n "${site_domain}" ]] || continue
-            socket_name="$(get_custom_site_socket_name "${site_domain}" "${site_port}")"
-            upstream_name="$(get_custom_site_upstream_name "${site_domain}" "${site_port}")"
-            echo "    upstream ${upstream_name} {"
-            echo "        server unix:/dev/shm/nginx/${socket_name}.sock;"
-            echo '    }'
-            echo
-        done < <(echo "${source_config}" | jq -r '.nginx.custom_sites // [] | .[] | [.domain, (.port | tostring)] | @tsv')
-        echo '    upstream default_backend {'
-        echo '        server unix:/dev/shm/nginx/default_backend.sock;'
-        echo '    }'
-        echo
-        echo '    server {'
-        echo '        listen         443 reuseport;'
-        echo '        listen         [::]:443 reuseport;'
-        echo '        ssl_preread    on;'
-        echo '        proxy_protocol on;'
-        echo '        proxy_pass     $tcpsni_name;'
-        echo '    }'
-        echo '}'
-    } >"${target_path}"
+    while IFS=$'\t' read -r site_domain site_scheme site_host site_port; do
+        [[ -n "${site_domain}" ]] || continue
+        local site_sni="site_$(echo "${site_domain}" | tr '.' '_')"
+        custom_sites_l4+="    @${site_sni} tls sni ${site_domain}
+    handle @${site_sni} {
+        tls
+        route {
+            reverse_proxy ${site_host}:${site_port}
+        }
+    }
+"
+        custom_sites_http+="${site_domain} {
+    reverse_proxy ${site_host}:${site_port}
+}
+"
+    done < <(echo "${source_config}" | jq -r '.caddy.custom_sites // [] | .[] | [.domain, .scheme, .host, (.port | tostring)] | @tsv')
+
+    cat >"${target_path}" <<CADDYEOF
+{
+    servers {
+        layer4
+    }
+    email ${ca_email}
 }
 
-function rebuild_stream_config() {
+:443 {
+    @reality tls sni ${domain}
+    handle @reality {
+        proxy xray:8443
+    }
+
+    @cdn tls sni ${cdn_domain}
+    handle @cdn {
+        tls
+        route {
+            reverse_proxy xray:8444
+        }
+    }
+
+${custom_sites_l4}
+}
+
+${cdn_domain} {
+    handle /${xhttp_path}* {
+        reverse_proxy xray:8444 {
+            transport http {
+                versions h2c
+            }
+        }
+    }
+    handle {
+        reverse_proxy xray:8444 {
+            transport http {
+                versions h2c
+            }
+        }
+    }
+}
+
+${custom_sites_http}
+:80 {
+    redir https://{host}{uri}
+}
+CADDYEOF
+}
+
+function rebuild_caddyfile() {
     local source_config="${1:-${SCRIPT_CONFIG}}"
-    write_stream_config "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" "${source_config}"
-}
-
-function render_custom_site_config() {
-    local domain="$1"
-    local scheme="$2"
-    local host="$3"
-    local port="$4"
-    local output_path="$5"
-    local socket_name="$(get_custom_site_socket_name "${domain}" "${port}")"
-    local proxy_target="${scheme}://${host}:${port}"
-
-    ensure_nginx_support_files || return 1
-    cp -f "${CONFIG_DIR}/nginx/conf/sites-available/custom-site.example.com.conf" "${output_path}" || return 1
-    sed -i "s|example.com|${domain}|g" "${output_path}"
-    sed -i "s|unix:/dev/shm/nginx/custom_site.sock|unix:/dev/shm/nginx/${socket_name}.sock|g" "${output_path}"
-    sed -i "s|PROXY_TARGET|${proxy_target}|g" "${output_path}"
-}
-
-function sync_custom_sites_config() {
-    local source_config="${1:-${SCRIPT_CONFIG}}"
-    local domain=''
-    local scheme=''
-    local host=''
-    local port=''
-    local conf_path=''
-
-    while IFS=$'\t' read -r domain scheme host port; do
-        [[ -n "${domain}" ]] || continue
-        conf_path="${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
-        render_custom_site_config "${domain}" "${scheme}" "${host}" "${port}" "${conf_path}" || return 1
-        ln -sf "${conf_path}" "${NGINX_CONFIG_DIR}/sites-enabled/${domain}.conf" || return 1
-    done < <(echo "${source_config}" | jq -r '.nginx.custom_sites // [] | .[] | [.domain, .scheme, .host, (.port | tostring)] | @tsv')
-}
-
-function test_and_reload_nginx() {
-    ensure_nginx_support_files || return 1
-    nginx -t || return 1
-    if systemctl -q is-active nginx; then
-        systemctl -q reload nginx
-    else
-        systemctl -q start nginx
-    fi
+    mkdir -p "${CADDY_CONFIG_DIR}"
+    write_caddyfile "${CADDY_CONFIG_PATH}" "${source_config}"
 }
 
 function get_custom_sites_count() {
-    echo "${SCRIPT_CONFIG}" | jq -r '.nginx.custom_sites // [] | length'
+    echo "${SCRIPT_CONFIG}" | jq -r '.caddy.custom_sites // [] | length'
 }
 
 function show_custom_sites_list() {
@@ -529,7 +488,6 @@ function show_custom_sites_list() {
     local scheme=''
     local host=''
     local port=''
-    local socket_name=''
 
     if ((custom_site_count == 0)); then
         echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.custom_sites.empty")" >&2
@@ -538,9 +496,20 @@ function show_custom_sites_list() {
 
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.custom_sites.list_header")" >&2
     while IFS=$'\t' read -r index domain scheme host port; do
-        socket_name="$(get_custom_site_socket_name "${domain}" "${port}")"
-        printf '%s | %s | %s://%s:%s | %s.sock\n' "${index}" "${domain}" "${scheme}" "${host}" "${port}" "${socket_name}" >&2
-    done < <(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.custom_sites // [] | to_entries[] | [(.key + 1 | tostring), .value.domain, .value.scheme, .value.host, (.value.port | tostring)] | @tsv')
+        printf '%s | %s | %s://%s:%s\n' "${index}" "${domain}" "${scheme}" "${host}" "${port}" >&2
+    done < <(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.custom_sites // [] | to_entries[] | [(.key + 1 | tostring), .value.domain, .value.scheme, .value.host, (.value.port | tostring)] | @tsv')
+}
+
+function rollback_caddyfile_backup() {
+    if [[ -f "${CADDY_CONFIG_PATH}.bak" ]]; then
+        mv -f "${CADDY_CONFIG_PATH}.bak" "${CADDY_CONFIG_PATH}"
+    fi
+}
+
+function get_custom_site_json_by_index() {
+    local site_index="$1"
+    echo "${SCRIPT_CONFIG}" | jq -c --argjson idx "$((site_index - 1))" '.caddy.custom_sites // [] | .[$idx]'
+}
 }
 
 function read_custom_site_domain_update() {
@@ -588,7 +557,7 @@ function rollback_stream_config_backup() {
 
 function get_custom_site_json_by_index() {
     local site_index="$1"
-    echo "${SCRIPT_CONFIG}" | jq -c --argjson idx "$((site_index - 1))" '.nginx.custom_sites // [] | .[$idx]'
+    echo "${SCRIPT_CONFIG}" | jq -c --argjson idx "$((site_index - 1))" '.caddy.custom_sites // [] | .[$idx]'
 }
 
 # =============================================================================
@@ -730,109 +699,22 @@ function handler_reset_script_config() {
 
 function handler_ca_server() {
     local target_ca_server="${1:-zerossl}"
-    local current_ca_server="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca_server')"
-    local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain')"
-    local cdn_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn')"
-    local -a reissue_targets=()
-    local -a switched_domains=()
-    local reissue_domain=''
+    local current_ca_server="$(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.ca_server')"
+    [[ "${target_ca_server,,}" == "${current_ca_server,,}" ]] && return 0
 
-    case "${target_ca_server,,}" in
-    zerossl | letsencrypt) ;;
-    *) target_ca_server='zerossl' ;;
-    esac
-    case "${current_ca_server,,}" in
-    zerossl | letsencrypt) ;;
-    *) current_ca_server='zerossl' ;;
-    esac
-
-    if [[ "${target_ca_server,,}" == "${current_ca_server,,}" ]]; then
-        handler_update_ocsp_config "${target_ca_server}" 'y'
-        return 0
-    fi
-
-    [[ -n "${domain}" && "${domain}" != 'null' ]] && reissue_targets+=("${domain}")
-    if [[ -n "${cdn_domain}" && "${cdn_domain}" != 'null' && "${cdn_domain}" != "${domain}" ]]; then
-        reissue_targets+=("${cdn_domain}")
-    fi
-    while IFS= read -r reissue_domain; do
-        [[ -n "${reissue_domain}" ]] || continue
-        reissue_targets+=("${reissue_domain}")
-    done < <(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.custom_sites // [] | .[] | .domain')
-
-    for reissue_domain in "${reissue_targets[@]}"; do
-        if exec_ssl '--issue' "--domain=${reissue_domain}" "--ca=${target_ca_server}"; then
-            switched_domains+=("${reissue_domain}")
-            continue
-        fi
-
-        for reissue_domain in "${switched_domains[@]}"; do
-            exec_ssl '--issue' "--domain=${reissue_domain}" "--ca=${current_ca_server}" || true
-        done
-        exec_ssl '--set-ca' "--ca=${current_ca_server}" || true
-        handler_update_ocsp_config "${current_ca_server}" 'y' || true
-        _error "ca switch failed, rolled back to ${current_ca_server}"
-    done
-
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg caServer "${target_ca_server,,}" '.nginx.ca_server = $caServer')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg caServer "${target_ca_server,,}" '.caddy.ca_server = $caServer')"
     echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
-    exec_ssl '--set-ca' "--ca=${target_ca_server}" || _error "failed to set acme default ca"
-    handler_update_ocsp_config "${target_ca_server}" 'y'
+    rebuild_caddyfile "${SCRIPT_CONFIG}"
+    handler_caddy_restart
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} CA server switched to ${target_ca_server}" >&2
 }
 
-function handler_update_ocsp_config() {
-    local ca_server="${1:-zerossl}"
-    local need_reload="${2:-n}"
-    local nginx_conf="${NGINX_CONFIG_DIR}/nginx.conf"
-    case "${ca_server,,}" in
-    zerossl | letsencrypt) ;;
-    *) ca_server='zerossl' ;;
-    esac
-    [[ -f "${nginx_conf}" ]] || return 0
-
-    if [[ "${ca_server,,}" == 'letsencrypt' ]]; then
-        sed -i -E 's|^([[:space:]]*)ssl_stapling([[:space:]]+on;)|\1# ssl_stapling\2|' "${nginx_conf}"
-        sed -i -E 's|^([[:space:]]*)ssl_stapling_verify([[:space:]]+on;)|\1# ssl_stapling_verify\2|' "${nginx_conf}"
-    else
-        sed -i -E 's|^([[:space:]]*)#([[:space:]]*)ssl_stapling([[:space:]]+on;)|\1ssl_stapling\3|' "${nginx_conf}"
-        sed -i -E 's|^([[:space:]]*)#([[:space:]]*)ssl_stapling_verify([[:space:]]+on;)|\1ssl_stapling_verify\3|' "${nginx_conf}"
-    fi
-
-    if [[ "${need_reload}" == 'y' ]] && cmd_exists 'nginx' && systemctl -q is-active nginx; then
-        nginx -t && systemctl -q reload nginx || _error "nginx.conf check failed after OCSP toggle"
-    fi
-}
+# handler_update_ocsp_config removed — Caddy manages OCSP automatically.
 
 # =============================================================================
-# 函数名称: handler_script_config
-# 功能描述: 处理并更新脚本配置文件 (config.json)。
-#           1. 打印配置更新提示。
-#           2. 调用 handler_reset_script_config 重置配置。
-#           3. 从 CONFIG_DATA 中获取或生成配置值。
-#           4. 根据配置标签 (tag) 更新不同的字段。
-#           5. 将更新后的配置写回 SCRIPT_CONFIG_PATH 文件。
-# 参数:
-#   $1: CONFIG_TAG - 配置标签 (例如 Vision, XHTTP, SNI 等)，默认从 CONFIG_DATA 获取
-# 返回值: 无 (直接修改 SCRIPT_CONFIG 全局变量和 SCRIPT_CONFIG_PATH 文件)
+# handler_script_config — updated for containerized Caddy
 # =============================================================================
 function handler_script_config() {
-    # 打印绿色的配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.script.config_update")" >&2
-    # 重置脚本配置 (默认重置 xray 部分)
-    handler_reset_script_config
-    # 从 CONFIG_DATA 或生成器获取配置值
-    # 获取配置标签
-    local CONFIG_TAG="${1:-${CONFIG_DATA['tag']}}"
-    # 获取规则状态
-    local XRAY_RULES_STATUS="${CONFIG_DATA['rules']}"
-    # 获取 block bt 状态
-    local XRAY_RULES_BT="${CONFIG_DATA['block-bt']}"
-    # 获取 block cn 状态
-    local XRAY_RULES_CN="${CONFIG_DATA['block-cn']}"
-    # 获取 block ad 状态
-    local XRAY_RULES_AD="${CONFIG_DATA['block-ad']}"
-    # 获取端口，默认 443
-    local XRAY_PORT="${CONFIG_DATA['port']:-443}"
     # 获取或生成 UUID
     local XRAY_UUID="$(exec_generate '--uuid' ${CONFIG_DATA['uuid']})"
     # 获取或生成 Fallback UUID
@@ -886,10 +768,9 @@ function handler_script_config() {
     sni)
         # 更新 Fallback UUID
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${FALLBACK_UUID}" '.xray.fallback = $uuid')"
-        # 为 SNI 更新 CA 邮箱、域名和 CDN
-        [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${TARGET_DOMAIN}" '.nginx.domain = $domain')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.caddy.ca_email = $ca')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${TARGET_DOMAIN}" '.caddy.domain = $domain')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.caddy.cdn = $cdn')"
         ;;
     esac
     # 根据配置标签更新特定字段 (第三部分)
@@ -980,10 +861,17 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     # 加载对应配置标签的 Xray 配置模板
+    # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' ${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json)"
-    # 如果配置标签不是 sni，则更新端口
+    # 更新端口 (适用于非 SNI 模式)
     if [[ "${CONFIG_TAG,,}" != 'sni' ]]; then
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.inbounds[1].port = $port')"
+    else
+    # SNI mode (Docker): convert UDS to TCP ports
+        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq '.inbounds[1].listen = "0.0.0.0" | .inbounds[1].port = 8443 | del(.inbounds[1].streamSettings.rawSettings)')
+        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq '.inbounds[2].listen = "0.0.0.0" | .inbounds[2].port = 8444')
+        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq 'del(.inbounds[1].settings.fallbacks[0].dest) | .inbounds[1].settings.fallbacks[0].dest = "127.0.0.1:8444" | .inbounds[1].settings.fallbacks[0].xver = 0')
+        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq 'del(.inbounds[1].streamSettings.realitySettings.target) | .inbounds[1].streamSettings.realitySettings.target = ""')
     fi
     # 根据配置标签更新特定字段 (第一部分)
     case "${CONFIG_TAG,,}" in
@@ -1102,7 +990,7 @@ function handler_read_xray_config() {
     vision | xhttp | trojan | fallback) exec_read 'target' ;; # 读取目标域名
     sni)
         # 为 SNI 配置读取域名和 CDN
-        local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
+        local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.ca_email')"
         # 如果 CA 邮箱为空，则读取邮箱
         [[ -z "${CA_EMAIL}" ]] && exec_read 'email'
         exec_read 'domain' # 读取域名
@@ -1135,21 +1023,17 @@ function handler_sni_config() {
     # 根据当前配置标签执行不同操作
     case "${CONFIG_TAG,,}" in
     mkcp | vision | xhttp | trojan | fallback)
-        # 对于非 SNI 配置，停止 Cloudreve 和 Nginx 服务
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'stop'
-        handler_nginx_stop
+        handler_caddy_stop
         ;;
     sni)
-        # 为域名和 CDN 配置 Nginx 和 SSL
-        handler_change_domain 'domain' 'n'
-        handler_change_domain 'cdn' 'n'
-        if (( $(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.custom_sites // [] | length') > 0 )); then
+        handler_change_domain 'domain'
+        handler_change_domain 'cdn'
+        if (( $(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.custom_sites // [] | length') > 0 )); then
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.custom_sites.syncing")" >&2
-            sync_custom_sites_config "${SCRIPT_CONFIG}" || _error "failed to sync custom sites"
-            rebuild_stream_config "${SCRIPT_CONFIG}"
+            rebuild_caddyfile "${SCRIPT_CONFIG}"
         fi
-        # 对于 SNI 配置，调用 handler_web 配置 Web 服务
         handler_web "${web}"
         ;;
     esac
@@ -1188,7 +1072,7 @@ function handler_custom_site_add() {
         --arg scheme "${scheme}" \
         --arg host "${host}" \
         --argjson port "${port}" \
-        '.nginx.custom_sites = ((.nginx.custom_sites // []) + [{"domain": $domain, "scheme": $scheme, "host": $host, "port": $port}])')"
+        '.caddy.custom_sites = ((.caddy.custom_sites // []) + [{"domain": $domain, "scheme": $scheme, "host": $host, "port": $port}])')"
 
     conf_path="${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
     link_path="${NGINX_CONFIG_DIR}/sites-enabled/${domain}.conf"
@@ -1267,7 +1151,7 @@ function handler_custom_site_update() {
         --arg scheme "${new_scheme}" \
         --arg host "${new_host}" \
         --argjson port "${new_port}" \
-        '.nginx.custom_sites[$idx] = {"domain": $domain, "scheme": $scheme, "host": $host, "port": $port}')"
+        '.caddy.custom_sites[$idx] = {"domain": $domain, "scheme": $scheme, "host": $host, "port": $port}')"
 
     old_conf_path="${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf"
     new_conf_path="${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf"
@@ -1354,7 +1238,7 @@ function handler_custom_site_delete() {
     link_path="${NGINX_CONFIG_DIR}/sites-enabled/${domain}.conf"
     conf_backup="${SCRIPT_CONFIG_DIR}/${domain}.custom-site.bak.conf"
 
-    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq --argjson idx "$((site_index - 1))" 'del(.nginx.custom_sites[$idx])')"
+    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq --argjson idx "$((site_index - 1))" 'del(.caddy.custom_sites[$idx])')"
     [[ -f "${conf_path}" ]] && cp -f "${conf_path}" "${conf_backup}"
     [[ -f "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" ]] && cp -f "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" "${stream_backup}"
 
@@ -1461,95 +1345,69 @@ function handler_change_xray_port() {
 # 参数:
 #   $1: xray_version - (可选) 要安装的 Xray 版本
 #   $2: force_install - (可选) 是否强制安装 ('y' 表示强制)，默认为 'n'
-# 返回值: 无 (通过调用外部脚本执行安装)
-# =============================================================================
 function handler_install() {
-    local xray_version="$1"       # 获取版本参数
-    local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
-    # 如果提供了版本参数，则处理版本配置
+    local xray_version="$1"
+    local force_install="${2:-n}"
+
     if [[ -n "${xray_version}" ]]; then
         handler_xray_version "${xray_version}"
     else
-        # 否则从脚本配置中读取版本
         CONFIG_DATA['version']="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')"
     fi
-    # 检查 Xray 命令是否存在，或是否强制安装
-    if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
-        # 调用 Xray-install 脚本进行安装
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --version "${CONFIG_DATA['version']}"
+
+    handler_docker
+    docker pull "${DOCKER_XRAY_IMAGE}"
+
+    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
+    if [[ "${CONFIG_TAG,,}" == 'sni' ]]; then
+        docker network inspect "${DOCKER_XRAY_NETWORK}" 2>/dev/null || \
+            docker network create "${DOCKER_XRAY_NETWORK}"
     fi
 }
 
 # =============================================================================
-# 函数名称: handler_purge
-# 功能描述: 卸载 Xray 核心及其配置。
-# 参数: 无
-# 返回值: 无 (通过调用外部脚本执行卸载)
-# =============================================================================
 function handler_purge() {
-    # 调用 Xray-install 脚本进行卸载 (带 --purge 参数)
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
-    # 重置 xray 字段
+    docker rm -f "${DOCKER_XRAY_CONTAINER}" 2>/dev/null || true
+    docker rm -f "${DOCKER_CADDY_CONTAINER}" 2>/dev/null || true
+    docker network rm "${DOCKER_XRAY_NETWORK}" 2>/dev/null || true
     SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')
-    # 将重置后的脚本配置写入文件
     echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
 }
 
-# =============================================================================
-# 函数名称: handler_start
-# 功能描述: 启动 Xray 服务。
-#           1. 检查 Xray 服务是否已在运行。
-#           2. 如果未运行则启动服务。
-#           3. 检查 Xray 服务是否已设置开机自启。
-#           4. 如果未设置则启用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
 function handler_start() {
-    # 检查 Xray 服务是否活跃，如果不活跃则启动
-    systemctl -q is-active xray || systemctl -q start xray
-    # 检查 Xray 服务是否已启用，如果未启用则启用
-    systemctl -q is-enabled xray || systemctl -q enable xray
+    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
+    local net_opt=''
+    local port_opt=''
+
+    docker start "${DOCKER_XRAY_CONTAINER}" 2>/dev/null && return 0
+
+    if [[ "${CONFIG_TAG,,}" == 'sni' ]]; then
+        net_opt="--network ${DOCKER_XRAY_NETWORK}"
+        port_opt=''
+    else
+        net_opt='--network host'
+        port_opt=''
+    fi
+
+    mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
+    docker run -d \
+        --name "${DOCKER_XRAY_CONTAINER}" \
+        ${net_opt} \
+        ${port_opt} \
+        -v "${DOCKER_DIR}/xray:/usr/local/etc/xray" \
+        -v xray-logs:/var/log/xray \
+        "${DOCKER_XRAY_IMAGE}"
 }
 
-# =============================================================================
-# 函数名称: handler_stop
-# 功能描述: 停止 Xray 服务。
-#           1. 检查 Xray 服务是否正在运行。
-#           2. 如果正在运行则停止服务。
-#           3. 检查 Xray 服务是否已设置开机自启。
-#           4. 如果已设置则禁用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
 function handler_stop() {
-    # 检查 Xray 服务是否活跃，如果活跃则停止
-    systemctl -q is-active xray && systemctl -q stop xray
-    # 检查 Xray 服务是否已启用，如果启用则禁用
-    systemctl -q is-enabled xray && systemctl -q disable xray
+    docker stop "${DOCKER_XRAY_CONTAINER}" 2>/dev/null || true
 }
 
-# =============================================================================
-# 函数名称: handler_restart
-# 功能描述: 重启 Xray 服务。
-#           1. 检查 Xray 服务是否正在运行。
-#           2. 如果正在运行则重启服务，否则启动服务。
-#           3. 检查 Xray 服务是否已设置开机自启。
-#           4. 如果未设置则启用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
 function handler_restart() {
-    # 检查 Xray 服务是否活跃，如果活跃则重启，否则启动
-    systemctl -q is-active xray && systemctl -q restart xray || systemctl -q start xray
-    # 检查 Xray 服务是否已启用，如果未启用则启用
-    systemctl -q is-enabled xray || systemctl -q enable xray
+    handler_stop
+    sleep 1
+    handler_start
 }
-
-# =============================================================================
-# 函数名称: handler_share
-# 功能描述: 调用 share.sh 脚本显示分享链接。
-# 参数: 无
 # 返回值: share.sh 脚本的输出
 # =============================================================================
 function handler_share() {
@@ -1678,310 +1536,94 @@ function handler_warp() {
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 function handler_reset_warp() {
-    # 确保 Docker 已安装
-    handler_docker
-    # 从脚本配置中读取当前 WARP 状态
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
-    # 从 Xray 配置文件加载配置
     XRAY_CONFIG="$(jq '.' "${XRAY_CONFIG_PATH}")"
-    # 如果 WARP 已启用 (状态为 1)
     if [[ ${WARP_STATUS} -eq 1 ]]; then
-        # 清空 WARP 容器日志数据
         exec_docker '--clean-container-logs'
-        # 调用 docker.sh 禁用 WARP 容器
         exec_docker '--disable-warp'
-        # 调用 docker.sh 构建并启用 WARP 容器
         exec_docker '--build-warp'
         exec_docker '--enable-warp'
     fi
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_install
-# 功能描述: 安装 Nginx。
-#           1. 检查系统中是否已安装 nginx 命令。
-#           2. 如果未安装，则调用 nginx.sh 脚本安装 (带 --brotli 参数)。
-#           3. 安装 SSL 证书管理工具。
-#           4. 配置 Nginx。
-#           5. 获取并保存 Nginx 版本到脚本配置。
-# 参数: 无
-# 返回值: 无 (通过调用其他脚本执行操作)
-# =============================================================================
 function handler_nginx_install() {
-    # 检查 nginx 命令是否存在
-    if ! cmd_exists 'nginx'; then
-        # 调用 nginx.sh 脚本安装 Nginx (带 Brotli 支持)
-        bash "${NGINX_PATH}" --install --brotli || _error "nginx install failed"
-        # 安装 SSL 证书管理工具
-        handler_ssl_install || _error "ssl install failed during nginx setup"
-        # 配置 Nginx
-        handler_nginx_config || _error "nginx config apply failed"
-        # 获取 Nginx 版本
-        local NGINX_VERSION="$(nginx -V 2>&1 | grep "^nginx version:.*" | cut -d / -f 2)"
-        [[ -n "${NGINX_VERSION}" ]] || _error "failed to detect nginx version"
-        # 更新脚本配置中的 Nginx 版本
-        SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg version "${NGINX_VERSION}" '.nginx.version = $version')
-        # 将更新后的脚本配置写入文件
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2 || _error "failed to persist nginx version"
-    fi
+    handler_docker
+    docker pull "${DOCKER_CADDY_IMAGE}"
 }
 
 # =============================================================================
-# 函数名称: handler_nginx_update
-# 功能描述: 更新 Nginx。
-# 参数: 无
-# 返回值: 无 (通过调用 nginx.sh 脚本执行更新)
+# Caddy service functions (replace Nginx)
 # =============================================================================
-function handler_nginx_update() {
-    # 调用 nginx.sh 脚本更新 Nginx (带 Brotli 支持)
-    bash "${NGINX_PATH}" --update --brotli
+
+function handler_caddy_update() {
+    docker pull "${DOCKER_CADDY_IMAGE}"
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_purge
-# 功能描述: 卸载 Nginx，并重置脚步配置。
-# 参数: 无
-# 返回值: 无 (通过调用 nginx.sh 脚本执行卸载)
-# =============================================================================
-function handler_nginx_purge() {
-    # 调用 nginx.sh 脚本卸载 Nginx
-    bash "${NGINX_PATH}" --purge
-    # 重置 nginx 字段
-    SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'nginx')
-    # 将重置后的脚本配置写入文件
+function handler_caddy_purge() {
+    docker rm -f "${DOCKER_CADDY_CONTAINER}" 2>/dev/null || true
+    SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'caddy')
     echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_cron
-# 功能描述: 管理 Nginx 更新的 Cron 任务。
-#           1. 检查 Nginx 是否已安装。
-#           2. 检查 Cron 任务是否存在。
-#           3. 如果存在则移除。
-#           4. 如果不存在则添加 (每天 3:00 执行更新)。
-# 参数: 无
-# 返回值: 无 (通过 crontab 命令管理任务)
-# =============================================================================
-function handler_nginx_cron() {
-    # 从脚本配置中检查 Nginx 状态 (版本)
-    local NGINX_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.version')"
-    # 如果 Nginx 已安装
-    if [[ -n "${NGINX_STATUS}" ]]; then
-        # 检查是否存在 Nginx 更新的 Cron 任务
-        if crontab -l | grep -q "${NGINX_PATH}"; then
-            # 移除现有的 Nginx Cron 任务
-            crontab -l | grep -v "${NGINX_PATH}" | crontab -
-            # 打印关闭 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.close_cron")" >&2
-        else
-            # 设置 nginx.sh 脚本为可执行
-            chmod a+x "${NGINX_PATH}"
-            # 添加新的 Nginx 更新 Cron 任务 (每天 3:00 执行)
-            (
-                crontab -l 2>/dev/null
-                echo "0 3 * * * ${NGINX_PATH} --update --brotli >/dev/null 2>&1"
-            ) | awk '!x[$0]++' | crontab -
-            # 打印开启 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.open_cron")" >&2
-        fi
-    fi
+function handler_caddy_start() {
+    local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.domain')"
+    local cdn_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.cdn')"
+    [[ -z "${domain}" || "${domain}" == 'null' ]] && return 0
+
+    rebuild_caddyfile "${SCRIPT_CONFIG}"
+    docker start "${DOCKER_CADDY_CONTAINER}" 2>/dev/null || \
+    docker run -d \
+        --name "${DOCKER_CADDY_CONTAINER}" \
+        --network "${DOCKER_XRAY_NETWORK}" \
+        -p 443:443 \
+        -p 80:80 \
+        -v "${CADDY_CONFIG_DIR}:/etc/caddy" \
+        -v caddy-data:/data/caddy \
+        "${DOCKER_CADDY_IMAGE}"
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_start
-# 功能描述: 启动 nginx 服务。
-#           1. 检查 nginx 服务是否已在运行。
-#           2. 如果未运行则启动服务。
-#           3. 检查 nginx 服务是否已设置开机自启。
-#           4. 如果未设置则启用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
-function handler_nginx_start() {
-    ensure_nginx_support_files || return 1
-    # 检查 nginx 服务是否活跃，如果不活跃则启动
-    systemctl -q is-active nginx || systemctl -q start nginx
-    # 检查 nginx 服务是否已启用，如果未启用则启用
-    systemctl -q is-enabled nginx || systemctl -q enable nginx
+function handler_caddy_stop() {
+    docker stop "${DOCKER_CADDY_CONTAINER}" 2>/dev/null || true
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_stop
-# 功能描述: 停止 nginx 服务。
-#           1. 检查 nginx 服务是否正在运行。
-#           2. 如果正在运行则停止服务。
-#           3. 检查 nginx 服务是否已设置开机自启。
-#           4. 如果已设置则禁用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
-function handler_nginx_stop() {
-    # 检查 nginx 服务是否活跃，如果活跃则停止
-    systemctl -q is-active nginx && systemctl -q stop nginx
-    # 检查 nginx 服务是否已启用，如果启用则禁用
-    systemctl -q is-enabled nginx && systemctl -q disable nginx
+function handler_caddy_restart() {
+    handler_caddy_stop
+    sleep 1
+    handler_caddy_start
 }
 
-# =============================================================================
-# 函数名称: handler_nginx_restart
-# 功能描述: 重启 nginx 服务。
-#           1. 检查 nginx 服务是否正在运行。
-#           2. 如果正在运行则重启服务，否则启动服务。
-#           3. 检查 nginx 服务是否已设置开机自启。
-#           4. 如果未设置则启用开机自启。
-# 参数: 无
-# 返回值: 无 (通过 systemctl 命令执行操作)
-# =============================================================================
-function handler_nginx_restart() {
-    ensure_nginx_support_files || return 1
-    # 检查 nginx 服务是否活跃，如果活跃则重启，否则启动
-    systemctl -q is-active nginx && systemctl -q restart nginx || systemctl -q start nginx
-    # 检查 nginx 服务是否已启用，如果未启用则启用
-    systemctl -q is-enabled nginx || systemctl -q enable nginx
+function handler_caddy_config() {
+    rebuild_caddyfile "${SCRIPT_CONFIG}"
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} Caddyfile configured" >&2
 }
 
-# =============================================================================
-# 函数名称: handler_ssl_install
-# 功能描述: 安装 SSL 证书管理工具 (acme.sh)。
-#           1. 检查 acme.sh 是否已安装。
-#           2. 如果未安装，则从脚本配置中读取 CA 邮箱。
-#           3. 调用 ssl.sh 脚本安装 acme.sh。
-# 参数: 无
-# 返回值: 无 (通过调用 ssl.sh 脚本执行安装)
-# =============================================================================
-function handler_ssl_install() {
-    # 检查 acme.sh 脚本是否存在
-    if [[ ! -e "${ACME_PATH}" ]]; then
-        # 从脚本配置中读取 CA 邮箱
-        local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
-        local CA_SERVER="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca_server')"
-        [[ -z "${CA_SERVER}" || "${CA_SERVER}" == 'null' ]] && CA_SERVER='zerossl'
-        # 调用 ssl.sh 脚本安装 acme.sh
-        exec_ssl '--install' "--email=${CA_EMAIL}" "--ca=${CA_SERVER}" || exit 1
-    fi
-}
+# handler_ssl_install / handler_renew_ssl — removed.
+# Caddy handles ACME automatically.
 
-# =============================================================================
-# 函数名称: handler_change_domain
-# 功能描述: 更改 Nginx 配置中的域名 (包括 SSL 证书)。
-#           1. 获取旧域名。
-#           2. 读取新域名 (如果未提供)。
-#           3. 如果旧域名存在，则停止其证书续签并删除配置文件。
-#           4. 复制并修改新的站点配置模板。
-#           5. 申请新的 SSL 证书。
-#           6. 更新脚本配置中的域名。
-#           7. 调用 handler_nginx_restart 重启 Nginx 服务。
-# 参数:
-#   $1: target_domain - 目标域名类型 ("domain" 或 "cdn")
-#   $2: stop_cert_service - 管理停止证书签发服务类型 ("n", 或默认的 "y")
-# 返回值: 无 (通过文件操作和调用其他脚本执行)
-# =============================================================================
 function handler_change_domain() {
-    # 获取 XHTTP PATH
-    local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path')"
-    # 获取目标域名类型参数
     local target_domain="$1"
-    # 获取管理停止证书签发服务参数
-    local stop_cert_service="${2:-y}"
-    # 从脚本配置中获取旧域名
-    local old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r --arg key "${target_domain}" '.nginx[$key]')"
-    ensure_nginx_support_files || _error "failed to sync nginx support files"
-    # 如果 CONFIG_DATA 中没有新域名，且 stop_cert_service 为 "y"，则读取用户输入
-    if [[ -z "${CONFIG_DATA["${target_domain}"]}" && "${stop_cert_service}" == "y" ]]; then
+    local old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r --arg key "${target_domain}" '.caddy[$key]')"
+
+    if [[ -z "${CONFIG_DATA["${target_domain}"]}" ]]; then
         [[ "${old_domain}" ]] && exec_read 'only-change-domain'
         exec_read "${target_domain}"
     else
         CONFIG_DATA["${target_domain}"]="${old_domain}"
     fi
-    # 备份旧域名的 Nginx 配置文件
-    [[ -e ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ]] && cp -f ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ${SCRIPT_CONFIG_DIR}/stream.conf
-    if [[ -e ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ]]; then
-        cp -f ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ${SCRIPT_CONFIG_DIR}/${old_domain}.conf
-        # 删除旧域名的 Nginx 配置文件
-        rm -rf ${NGINX_CONFIG_DIR}/sites-{available,enabled}/${old_domain}.conf
+
+    # Update config (Caddy auto-issues certs)
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" '.caddy[$key] = $domain')"
+    if [[ "${target_domain}" == "domain" ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${CONFIG_DATA["${target_domain}"]}" '.xray.target = $domain')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${CONFIG_DATA["${target_domain}"]}" '.xray.serverNames = [$domain]')"
     fi
-    # 复制站点配置模板到 available 目录
-    cp -f "${CONFIG_DIR}/nginx/conf/sites-available/${target_domain}.example.com.conf" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 替换配置文件中的 example.com 为实际域名
-    sed -i "s|example.com|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 替换配置文件中的 /yourpath 为 xhttp path
-    sed -i "s|/yourpath|${XHTTP_PATH}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 创建从 available 到 enabled 的软链接
-    ln -sf "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf" "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 为新域名申请 SSL 证书
-    if exec_ssl '--issue' --domain=${CONFIG_DATA["${target_domain}"]}; then
-        # 如果旧域名存在
-        if [[ -n "${old_domain}" && "${stop_cert_service}" == "y" ]] && exec_ssl '--status' --domain=${old_domain}; then
-            # 停止旧域名的证书续签
-            exec_ssl '--stop-renew' --domain=${old_domain}
-        fi
-    else
-        # 删除新配置
-        rm -rf ${NGINX_CONFIG_DIR}/sites-{available,enabled}/${CONFIG_DATA["${target_domain}"]}.conf
-        # 恢复备份的 Nginx 配置文件
-        mv -f ${SCRIPT_CONFIG_DIR}/stream.conf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
-        mv -f ${SCRIPT_CONFIG_DIR}/${old_domain}.conf ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf
-        ln -sf ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ${NGINX_CONFIG_DIR}/sites-enabled/${old_domain}.conf
-        # 重启或启动 Nginx
-        handler_nginx_restart
-        exit 1
-    fi
-    # 更新脚本配置中的域名
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" '.nginx[$key] = $domain')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${old_domain}" 'if $key == "domain" then del(.target[$key]) else . end')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" 'if $key == "domain" then .xray.target = $domain else . end')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" 'if $key == "domain" then .xray.serverNames = [$domain] else . end')"
-    rebuild_stream_config "${SCRIPT_CONFIG}"
-    # 将更新后的脚本配置写入文件
     persist_script_config
-    # 如果仅更新域名
-    if [[ "${CONFIG_DATA['only-change-domain'],,}" == "y" ]]; then
-        # 恢复备份的 Nginx 配置文件
-        mv -f ${SCRIPT_CONFIG_DIR}/${old_domain}.conf ${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf
-        rm -rf "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
-        # 更新域名
-        sed -i "s|${old_domain}|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-        # 创建从 available 到 enabled 的软链接
-        ln -sf "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf" "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
-        rebuild_stream_config "${SCRIPT_CONFIG}"
-    fi
-    # 重启或启动 Nginx
-    handler_nginx_restart
+    rebuild_caddyfile "${SCRIPT_CONFIG}"
+    handler_caddy_restart
 }
 
-# =============================================================================
-# 函数名称: handler_renew_ssl
-# 功能描述: 强制续期所有由 acme.sh 管理的 SSL 证书。
-# 参数: 无
-# 返回值: 无 (通过文件操作和调用其他脚本执行)
-# =============================================================================
-function handler_renew_ssl() {
-    exec_ssl '--renew' || _error "ssl renew failed"
-    handler_nginx_restart || _error "nginx restart failed after renew"
-    handler_restart || _error "xray restart failed after renew"
-}
-
-# =============================================================================
-# 函数名称: handler_nginx_config
-# 功能描述: 配置 Nginx。
-#           1. 创建 sites-enabled 目录。
-#           2. 备份并复制 Nginx 主配置文件和站点配置模板。
-#           3. 从脚本配置中读取域名和 CDN。
-#           4. 调用 handler_change_domain 为域名和 CDN 配置 SSL。
-# 参数: 无
-# 返回值: 无 (通过文件操作执行)
-# =============================================================================
 function handler_nginx_config() {
-    # 创建 Nginx sites-enabled 目录 (如果不存在)
-    mkdir -vp ${NGINX_CONFIG_DIR}/sites-enabled || return 1
-    if [[ -f "${NGINX_CONFIG_DIR}/nginx.conf" ]]; then
-        mv "${NGINX_CONFIG_DIR}/nginx.conf" "${NGINX_CONFIG_DIR}/default.conf.bak" || return 1
-    fi
-    # 复制项目中的 Nginx 配置文件到目标目录
-    cp -af ${CONFIG_DIR}/nginx/conf/* ${NGINX_CONFIG_DIR} || return 1
-
-    local CA_SERVER="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca_server')"
-    handler_update_ocsp_config "${CA_SERVER}" || return 1
+    handler_caddy_config
 }
 
 # =============================================================================
@@ -2030,62 +1672,32 @@ function handler_cloudreve_v4() {
     esac
 }
 
-# =============================================================================
-# 函数名称: handler_web
-# 功能描述: 配置和管理 Web 服务 (Cloudreve) 与 Nginx 的集成。
-#           1. 根据 Web 类型启动/停止对应的 Cloudreve 容器。
-#           2. 修改 Nginx 配置文件以包含或排除 Cloudreve 配置片段。
-#           3. 调用 handler_nginx_restart 重启 Nginx 服务。
-#           4. 调用 handler_restart 重启 Xray 服务。
-#           5. 更新脚本配置中的 Web 类型。
-# 参数:
-#   $1: web - Web 服务类型 ("v3", "v4", 或默认的 "normal")
-# 返回值: 无 (通过调用其他函数执行操作)
-# =============================================================================
 function handler_web() {
-    local web="${1:-normal}" # 获取 Web 类型参数，默认为 normal
-    # 从脚本配置中读取域名和 CDN
-    local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain')"
-    local cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn')"
-    # 根据 Web 类型启动/停止 Cloudreve 容器
+    local web="${1:-normal}"
+
+    # Manage Cloudreve containers
     case "${web}" in
     v3)
-        # 启动 v3，停止 v4
         handler_cloudreve_v4 'stop'
         handler_cloudreve_v3 'start'
         ;;
     v4)
-        # 启动 v4，停止 v3
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'start'
         ;;
     *)
-        # 停止 v3 和 v4
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'stop'
         ;;
     esac
-    # 根据 Web 类型修改 Nginx 配置以包含或排除 Cloudreve
-    case "${web}" in
-    v3 | v4)
-        # 启用 Cloudreve 配置 (取消注释)
-        sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
-        sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        sed -i "s|include web/normal.conf;|# include web/normal.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        ;;
-    *)
-        # 禁用 Cloudreve 配置 (添加注释)
-        sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
-        sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        sed -i "s|# include web/normal.conf;|include web/normal.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        ;;
-    esac
-    # 重启或启动 Nginx 与 xray 服务
-    handler_nginx_restart
+
+    # Rebuild Caddyfile and restart
+    rebuild_caddyfile "${SCRIPT_CONFIG}"
+    handler_caddy_restart
     handler_restart
-    # 更新脚本配置中的 Web 类型
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg web "${web}" '.nginx.web = $web')"
-    # 将更新后的脚本配置写入文件
+
+    # Update config
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg web "${web}" '.caddy.web = $web')"
     echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
 }
 
@@ -2148,12 +1760,12 @@ function main() {
     --install) handler_install "$@" ;;        # 安装 Xray
     --version) handler_xray_version "$1" ;;   # 设置 Xray 版本
     --purge) handler_purge ;;                 # 卸载 Xray
-    --nginx-install) handler_nginx_install ;; # 安装 Nginx
-    --nginx-update) handler_nginx_update ;;   # 更新 Nginx
-    --nginx-purge) handler_nginx_purge ;;     # 卸载 Nginx
+    --caddy-install) handler_caddy_update ;;       # Pull Caddy image
+    --caddy-update) handler_caddy_update ;;         # Update Caddy image
+    --caddy-purge) handler_caddy_purge ;;           # Remove Caddy container
     --script-config)
-        handler_read_xray_config "$1" # 读取 Xray 配置输入
-        handler_script_config         # 更新脚本配置
+        handler_read_xray_config "$1"
+        handler_script_config
         ;;
     --xray-config)
         handler_sni_config "$1" # 处理 SNI 配置
@@ -2163,21 +1775,18 @@ function main() {
     --sni-ports) handler_check_sni_ports ;;
     --routing) handler_routing "$@" ;; # 处理路由规则
     --change-domain)
-        handler_change_domain "$1" # 处理域名配置
-        handler_xray_config        # 更新 Xray 配置
-        handler_restart            # 重启 Xray
+        handler_change_domain "$1"
+        handler_xray_config
+        handler_restart
         if ! [[ "${CONFIG_DATA['only-change-domain'],,}" == "y" ]]; then
-            # 还原 Web 服务
-            handler_web "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.web')"
+            handler_web "$(echo "${SCRIPT_CONFIG}" | jq -r '.caddy.web')"
         fi
         ;;                                      # 更改域名
-    --renew-certificate) handler_renew_ssl ;;   # 强制证书续签
     --web) handler_web "$1" ;;                  # 配置 Web 服务
     --v3-reset) handler_cloudreve_v3 'reset' ;; # 重置 Cloudreve v3
     --ca-server) handler_ca_server "$1" ;;
     --custom-sites) handler_custom_sites "$1" ;;
     --share) handler_share ;;                   # 显示分享链接
-    --nginx-cron) handler_nginx_cron ;;         # 管理 Nginx Cron
     --geodata-cron) handler_geodata_cron ;;     # 管理 GeoData Cron
     --warp) handler_warp ;;                     # 管理 WARP
     --reset-warp) handler_reset_warp ;;         # 重置 WARP

@@ -1,15 +1,15 @@
 {
-  "version": "v2026.03.17",
+  "version": "v2026.03.17-docker",
   "path": "",
   "language": "",
   "xray": {
     "version": "",
     "warp": 0,
     "rules": {
-      "reset": "",
-      "bt": 0,
-      "cn": 0,
-      "ad": 0
+      "reset": null,
+      "bt": null,
+      "cn": null,
+      "ad": null
     },
     "tag": "",
     "port": 443,
@@ -29,9 +29,8 @@
       ""
     ]
   },
-  "nginx": {
-    "version": "",
-    "ca": "",
+  "caddy": {
+    "ca_email": "",
     "ca_server": "zerossl",
     "domain": "",
     "cdn": "",
@@ -40,15 +39,7 @@
   },
   "target": {
     "www.fandom.com": [
-      "fandom.com",
-      "www.fandom.com",
-      "toarumajutsunoindex.fandom.com",
-      "dragonball.fandom.com",
-      "pokemon.fandom.com",
-      "nichijou.fandom.com",
-      "bleach.fandom.com",
-      "naruto.fandom.com",
-      "onepiece.fandom.com"
+      "www.fandom.com"
     ],
     "tidal.com": [
       "tidal.com"
@@ -83,18 +74,9 @@
   },
   "rules": [
     {
-      "ruleTag": "api",
-      "inboundTag": [
-        "api"
-      ],
-      "outboundTag": "api"
-    },
-    {
-      "ruleTag": "private-ip",
-      "ip": [
-        "geoip:private"
-      ],
-      "outboundTag": "block"
+      "type": "field",
+      "port": "0-65535",
+      "outboundTag": "proxy"
     }
   ]
 }

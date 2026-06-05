@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+# Build Caddy with caddy-l4 plugin
+FROM caddy:2.11-builder-alpine AS builder
+RUN xcaddy build --with github.com/mholt/caddy-l4
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+RUN mkdir -p /etc/caddy /data/caddy
+VOLUME ["/etc/caddy", "/data/caddy"]
+EXPOSE 443 80
+ENTRYPOINT ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

@@ -1,0 +1,10 @@
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata
+ARG XRAY_VERSION=latest
+RUN wget -qO /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip \
+    && unzip -q /tmp/xray.zip -d /tmp/xray \
+    && install -m755 /tmp/xray/xray /usr/local/bin/xray \
+    && rm -rf /tmp/xray.zip /tmp/xray
+RUN mkdir -p /usr/local/share/xray /usr/local/etc/xray
+VOLUME ["/usr/local/etc/xray"]
+ENTRYPOINT ["xray", "run", "-config", "/usr/local/etc/xray/config.json"]
