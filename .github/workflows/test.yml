@@ -19,7 +19,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      # --- Build the xray-core image from Dockerfile.xray ---
       - name: Build xray-core Docker image
         uses: docker/build-push-action@v5
         with:
@@ -29,17 +28,15 @@ jobs:
           load: true
           tags: xray-core:e2e
 
-      # --- Generate REALITY x25519 keypair ---
       - name: Generate REALITY keypair
         id: keys
         run: |
           KEYS="$(docker run --rm --entrypoint xray xray-core:e2e x25519)"
-          echo "private=$(echo "$KEYS" | awk '/Private/{print $3}')" >> "$GITHUB_OUTPUT"
-          echo "public=$(echo "$KEYS"  | awk '/Public/{print $3}')"  >> "$GITHUB_OUTPUT"
-          echo "uuid=$(cat /proc/sys/kernel/random/uuid)"           >> "$GITHUB_OUTPUT"
-          echo "short_id=$(openssl rand -hex 8)"                     >> "$GITHUB_OUTPUT"
+          echo "private=$(echo "$KEYS" | sed -n 's/.*Private key: //p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "public=$(echo "$KEYS"  | sed -n 's/.*Public key: //p' | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "uuid=$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
+          echo "short_id=$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
 
-      # --- Write Xray server + client configs using Python script ---
       - name: Generate Xray configs (server + client)
         run: |
           export UUID="${{ steps.keys.outputs.uuid }}"
@@ -48,7 +45,6 @@ jobs:
           export SHORT_ID="${{ steps.keys.outputs.short_id }}"
           python3 .github/scripts/gen-configs.py
 
-      # --- Server (VPS) container: Xray REALITY on :8443 ---
       - name: Start server container (VPS)
         run: |
           docker network create xray-e2e
@@ -59,7 +55,6 @@ jobs:
           sleep 3
           docker logs xray-server
 
-      # --- Client container: Xray SOCKS :1080 -> REALITY -> server ---
       - name: Start client container (Linux)
         run: |
           docker run -d --name xray-client \
@@ -70,7 +65,6 @@ jobs:
           sleep 3
           docker logs xray-client
 
-      # --- Verify traffic flows through the REALITY tunnel ---
       - name: Test HTTP(S) through REALITY tunnel
         run: |
           echo "=== Test 1: google.com ==="
@@ -91,7 +85,6 @@ jobs:
           [[ "$CODE" == "200" ]] || { echo "FAIL (got $CODE)"; exit 1; }
           echo "PASS"
 
-      # --- Debug: show logs if tests failed ---
       - name: Show logs on failure
         if: failure()
         run: |
@@ -100,7 +93,6 @@ jobs:
           echo "=== Client logs ==="
           docker logs xray-client 2>&1 | tail -50 || true
 
-      # --- Tear down containers and network ---
       - name: Cleanup
         if: always()
         run: |
